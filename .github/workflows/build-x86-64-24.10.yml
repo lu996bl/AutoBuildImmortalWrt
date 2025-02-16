@@ -47,12 +47,14 @@ jobs:
   build:
     needs: validate-inputs
     runs-on: ubuntu-22.04
+    timeout-minutes: 360  # 延长超时时间
     strategy:
       matrix:
         profile: ${{ fromJSON(needs.validate-inputs.outputs.profiles) }}
+      max-parallel: 2  # 限制并行任务数
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4  # 同步更新 checkout 到 v4
+        uses: actions/checkout@v4
 
       - name: Set executable permissions
         run: chmod +x ${{ github.workspace }}/x86-64/build.sh
@@ -66,11 +68,10 @@ jobs:
             fi
           fi
 
-      - name: Build ImmortalWrt (Profile ${{ matrix.profile }})
+      - name: Build ImmortalWrt (Profile ${{ matrix.profile }}
         run: |
-          set -e
+          set -ex  # 启用详细日志和严格错误处理
           echo "正在构建配置：${{ matrix.profile }} MB"
-
           docker run --rm -i \
             --user root \
             -v "${{ github.workspace }}/bin-${{ matrix.profile }}:/home/build/immortalwrt/bin" \
@@ -84,45 +85,43 @@ jobs:
             -e PPPOE_PASSWORD=${{ inputs.pppoe_password }} \
             immortalwrt/imagebuilder:x86-64-openwrt-24.10.0-rc3 /bin/bash /home/build/immortalwrt/build.sh
 
-      - name: Upload artifact (Profile ${{ matrix.profile }})
-        uses: actions/upload-artifact@v4  # 更新到 v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
           name: firmware-${{ matrix.profile }}
-          path: ${{ github.workspace }}/bin-${{ matrix.profile }}/targets/x86/64/*.img.gz
+          path: bin-${{ matrix.profile }}/targets/x86/64/*.img.gz
 
   release:
     needs: [validate-inputs, build]
+    if: success()  # 仅在构建成功时执行
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4  # 更新到 v4
+        uses: actions/download-artifact@v4
         with:
-          path: ${{ github.workspace }}/artifacts
+          path: artifacts
 
       - name: Generate SHA-256 and Prepare Release
         run: |
-          mkdir -p ${{ github.workspace }}/release
-          find ${{ github.workspace }}/artifacts -name "*.img.gz" -exec cp {} ${{ github.workspace }}/release \;
-
-          cd ${{ github.workspace }}/release
+          mkdir -p release
+          find artifacts -name "*.img.gz" -exec cp {} release \;
+          cd release
           for file in *.img.gz; do
             sha256sum "$file" > "$file.sha256"
             sha256sum -c "$file.sha256"
           done
-
           echo "### ImmortalWrt 固件构建信息" > info.md
           echo "- 构建时间: $(date)" >> info.md
-          if [[ "${{ github.event.inputs.include_docker }}" == "yes" ]]; then
-            echo "- 包含 Docker 插件" >> info.md
-          fi
+          [[ "${{ github.event.inputs.include_docker }}" == "yes" ]] && echo "- 包含 Docker 插件" >> info.md
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2.2.1
         with:
           tag_name: Autobuild-x86-64
-          body_path: ${{ github.workspace }}/release/info.md
+          body_path: release/info.md
           files: |
-            ${{ github.workspace }}/release/*.img.gz
-            ${{ github.workspace }}/release/*.sha256
+            release/*.img.gz
+            release/*.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
