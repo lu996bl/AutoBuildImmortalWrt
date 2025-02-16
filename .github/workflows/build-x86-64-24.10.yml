@@ -4,12 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       profile:
-        description: '请输入要编译固件大小 单位(MB)'
+        description: '请输入要编译的固件配置（多个配置用逗号分隔，如 1024,2048）'
         required: true
         default: '1024'
       include_docker:
-        description: |
-          是否编译 Docker 插件
+        description: '是否编译 Docker 插件'
         required: true
         default: 'yes'
         type: choice
@@ -32,9 +31,25 @@ on:
         required: false
 
 jobs:
-  build:
+  validate-inputs:
     runs-on: ubuntu-22.04
+    outputs:
+      profiles: ${{ steps.split-profiles.outputs.profiles }}
+    steps:
+      - name: Split profiles into array
+        id: split-profiles
+        run: |
+          # 将输入的 profile 按逗号分割为数组
+          profiles="${{ github.event.inputs.profile }}"
+          IFS=',' read -ra profile_array <<< "$profiles"
+          echo "profiles=${profile_array[@]}" >> $GITHUB_OUTPUT
 
+  build:
+    needs: validate-inputs
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        profile: ${{ fromJSON(needs.validate-inputs.outputs.profiles) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -42,65 +57,75 @@ jobs:
       - name: Set executable permissions
         run: chmod +x ${{ github.workspace }}/x86-64/build.sh
 
-
       - name: Validate PPPoE Inputs
         run: |
           if [[ "${{ inputs.enable_pppoe }}" == "yes" ]]; then
             if [[ -z "${{ inputs.pppoe_account }}" || -z "${{ inputs.pppoe_password }}" ]]; then
-              echo "Error: PPPoE account and password must be provided when PPPoE is enabled!"
+              echo "Error: PPPoE 账号和密码必须填写！"
               exit 1
             fi
           fi
 
-      - name: Build ImmortalWrt-x86-64-eif
+      - name: Build ImmortalWrt (Profile ${{ matrix.profile }})
         run: |
-          profiles="${{ github.event.inputs.profile }}"
-          include_docker="${{ github.event.inputs.include_docker }}"
-          IFS=',' read -r -a profile_array <<< "$profiles"
-          
-          for profile in "${profile_array[@]}"; do
-            echo "Building for profile: $profile"
-            
-            docker run --rm -i \
-              --user root \
-              -v "${{ github.workspace }}/bin:/home/build/immortalwrt/bin" \
-              -v "${{ github.workspace }}/files:/home/build/immortalwrt/files" \
-              -v "${{ github.workspace }}/x86-64/imm.config:/home/build/immortalwrt/.config" \
-              -v "${{ github.workspace }}/x86-64/24.10/build.sh:/home/build/immortalwrt/build.sh" \
-              -e PROFILE=$profile \
-              -e INCLUDE_DOCKER=$include_docker \
-              -e ENABLE_PPPOE=${{ inputs.enable_pppoe }} \
-              -e PPPOE_ACCOUNT=${{ inputs.pppoe_account }} \
-              -e PPPOE_PASSWORD=${{ inputs.pppoe_password }} \
-              immortalwrt/imagebuilder:x86-64-openwrt-24.10.0-rc3 /bin/bash /home/build/immortalwrt/build.sh
-          done
+          set -e  # 严格错误处理
+          echo "正在构建配置：${{ matrix.profile }} MB"
 
-      - name: Generate Firmware SHA-256
+          docker run --rm -i \
+            --user root \
+            -v "${{ github.workspace }}/bin-${{ matrix.profile }}:/home/build/immortalwrt/bin" \
+            -v "${{ github.workspace }}/files:/home/build/immortalwrt/files" \
+            -v "${{ github.workspace }}/x86-64/imm.config:/home/build/immortalwrt/.config" \
+            -v "${{ github.workspace }}/x86-64/24.10/build.sh:/home/build/immortalwrt/build.sh" \
+            -e PROFILE=${{ matrix.profile }} \
+            -e INCLUDE_DOCKER=${{ github.event.inputs.include_docker }} \
+            -e ENABLE_PPPOE=${{ inputs.enable_pppoe }} \
+            -e PPPOE_ACCOUNT=${{ inputs.pppoe_account }} \
+            -e PPPOE_PASSWORD=${{ inputs.pppoe_password }} \
+            immortalwrt/imagebuilder:x86-64-openwrt-24.10.0-rc3 /bin/bash /home/build/immortalwrt/build.sh
+
+      - name: Upload artifact (Profile ${{ matrix.profile }})
+        uses: actions/upload-artifact@v3
+        with:
+          name: firmware-${{ matrix.profile }}
+          path: ${{ github.workspace }}/bin-${{ matrix.profile }}/targets/x86/64/*.img.gz
+
+  release:
+    needs: [validate-inputs, build]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: ${{ github.workspace }}/artifacts
+
+      - name: Generate SHA-256 and Prepare Release
         run: |
-          cp ${{ github.workspace }}/bin/targets/x86/64/*squashfs-combined-efi.img.gz ${{ github.workspace }}
-          for file in *squashfs-combined-efi.img.gz; do
+          mkdir -p ${{ github.workspace }}/release
+          # 合并所有固件文件
+          find ${{ github.workspace }}/artifacts -name "*.img.gz" -exec cp {} ${{ github.workspace }}/release \;
+
+          # 生成校验和
+          cd ${{ github.workspace }}/release
+          for file in *.img.gz; do
             sha256sum "$file" > "$file.sha256"
             sha256sum -c "$file.sha256"
           done
 
-      - name: Create info
-        run: |
-          if [ "${{ github.event.inputs.include_docker }}" == "yes" ]; then
-            extra_content="#### 默认带docker"
-            echo -e "\n $extra_content" >> ${{ github.workspace }}/info.md
-          else
-            echo -e "NO docker"
+          # 创建 info.md
+          echo "### ImmortalWrt 固件构建信息" > info.md
+          echo "- 构建时间: $(date)" >> info.md
+          if [[ "${{ github.event.inputs.include_docker }}" == "yes" ]]; then
+            echo "- 包含 Docker 插件" >> info.md
           fi
 
-      - name: Upload ImmortWrt as release assets
+      - name: Upload to Release
         uses: softprops/action-gh-release@v2.2.1
         with:
           tag_name: Autobuild-x86-64
-          body_path: ${{ github.workspace }}/info.md
+          body_path: ${{ github.workspace }}/release/info.md
           files: |
-            ${{ github.workspace }}/*squashfs-combined-efi.img.gz
-            ${{ github.workspace }}/*.sha256
-          token: ${{ secrets.GITHUB_TOKEN }}
+            ${{ github.workspace }}/release/*.img.gz
+            ${{ github.workspace }}/release/*.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
