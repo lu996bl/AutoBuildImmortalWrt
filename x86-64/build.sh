@@ -1,61 +1,68 @@
 #!/bin/bash
-# Log file for debugging
+
+# 日志文件
 LOGFILE="/tmp/uci-defaults-log.txt"
-echo "Starting 99-custom.sh at $(date)" >> $LOGFILE
-echo "编译固件大小为: $PROFILE MB"
-echo "Include Docker: $INCLUDE_DOCKER"
+exec > >(tee -a "$LOGFILE") 2>&1
 
-echo "Create pppoe-settings"
-mkdir -p  /home/build/immortalwrt/files/etc/config
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"
+}
 
-# 创建pppoe配置文件 yml传入环境变量ENABLE_PPPOE等 写入配置文件 供99-custom.sh读取
-cat << EOF > /home/build/immortalwrt/files/etc/config/pppoe-settings
+log "Starting 99-custom.sh"
+log "编译固件大小为: $PROFILE MB"
+log "Include Docker: $INCLUDE_DOCKER"
+
+# 创建 PPPoE 配置文件
+mkdir -p /home/build/immortalwrt/files/etc/config
+
+if [[ "$ENABLE_PPPOE" == "yes" && -n "$PPPOE_ACCOUNT" && -n "$PPPOE_PASSWORD" ]]; then
+    cat << EOF > /home/build/immortalwrt/files/etc/config/pppoe-settings
 enable_pppoe=${ENABLE_PPPOE}
 pppoe_account=${PPPOE_ACCOUNT}
 pppoe_password=${PPPOE_PASSWORD}
 EOF
-
-echo "cat pppoe-settings"
-cat /home/build/immortalwrt/files/etc/config/pppoe-settings
-# 输出调试信息
-echo "$(date '+%Y-%m-%d %H:%M:%S') - 开始编译..."
-
-
-
-# 定义所需安装的包列表 下列插件你都可以自行删减
-PACKAGES=""
-PACKAGES="$PACKAGES curl"
-PACKAGES="$PACKAGES luci-i18n-diskman-zh-cn"
-PACKAGES="$PACKAGES luci-i18n-firewall-zh-cn"
-PACKAGES="$PACKAGES luci-i18n-filebrowser-zh-cn"
-PACKAGES="$PACKAGES luci-app-argon-config"
-PACKAGES="$PACKAGES luci-i18n-argon-config-zh-cn"
-PACKAGES="$PACKAGES luci-i18n-opkg-zh-cn"
-PACKAGES="$PACKAGES luci-i18n-ttyd-zh-cn"
-PACKAGES="$PACKAGES luci-i18n-passwall-zh-cn"
-PACKAGES="$PACKAGES luci-app-openclash"
-PACKAGES="$PACKAGES luci-i18n-homeproxy-zh-cn"
-PACKAGES="$PACKAGES openssh-sftp-server"
-# 增加几个必备组件 方便用户安装iStore
-PACKAGES="$PACKAGES fdisk"
-PACKAGES="$PACKAGES script-utils"
-PACKAGES="$PACKAGES luci-i18n-samba4-zh-cn"
-
-# 判断是否需要编译 Docker 插件
-if [ "$INCLUDE_DOCKER" = "yes" ]; then
-    PACKAGES="$PACKAGES luci-i18n-dockerman-zh-cn"
-    echo "Adding package: luci-i18n-dockerman-zh-cn"
+    chmod 644 /home/build/immortalwrt/files/etc/config/pppoe-settings
+    log "PPPoE 配置文件已生成"
+else
+    log "未启用 PPPoE 或缺少账号/密码，跳过生成配置文件"
 fi
 
-# 构建镜像
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Building image with the following packages:"
-echo "$PACKAGES"
+# 定义软件包列表
+PACKAGES=(
+    "curl"
+    "luci-i18n-diskman-zh-cn"
+    "luci-i18n-firewall-zh-cn"
+    "luci-i18n-filebrowser-zh-cn"
+    "luci-app-argon-config"
+    "luci-i18n-argon-config-zh-cn"
+    "luci-i18n-opkg-zh-cn"
+    "luci-i18n-ttyd-zh-cn"
+    "luci-i18n-passwall-zh-cn"
+    "luci-app-openclash"
+    "luci-i18n-homeproxy-zh-cn"
+    "openssh-sftp-server"
+    "fdisk"
+    "script-utils"
+    "luci-i18n-samba4-zh-cn"
+)
 
-make image PROFILE="generic" PACKAGES="$PACKAGES" FILES="/home/build/immortalwrt/files" ROOTFS_PARTSIZE=$PROFILE
+# 添加 Docker 插件
+if [ "$INCLUDE_DOCKER" = "yes" ]; then
+    PACKAGES+=("luci-i18n-dockerman-zh-cn")
+    log "Adding package: luci-i18n-dockerman-zh-cn"
+fi
 
-if [ $? -ne 0 ]; then
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Error: Build failed!"
+# 构建固件
+set -e  # 严格错误处理
+
+log "Building image with the following packages:"
+log "${PACKAGES[@]}"
+
+make image PROFILE="generic" PACKAGES="${PACKAGES[*]}" FILES="/home/build/immortalwrt/files" ROOTFS_PARTSIZE=$PROFILE
+
+if [ $? -eq 0 ]; then
+    log "Build completed successfully."
+else
+    log "Error: Build failed!"
     exit 1
 fi
-
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Build completed successfully."
