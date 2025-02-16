@@ -36,13 +36,14 @@ jobs:
     outputs:
       profiles: ${{ steps.split-profiles.outputs.profiles }}
     steps:
-      - name: Split profiles into array
+      - name: Split profiles into JSON array
         id: split-profiles
         run: |
-          # 将输入的 profile 按逗号分割为数组
           profiles="${{ github.event.inputs.profile }}"
           IFS=',' read -ra profile_array <<< "$profiles"
-          echo "profiles=${profile_array[@]}" >> $GITHUB_OUTPUT
+          # 使用 jq 生成 JSON 数组
+          json_profiles=$(jq -nc '$ARGS.positional' --args "${profile_array[@]}")
+          echo "profiles=$json_profiles" >> $GITHUB_OUTPUT
 
   build:
     needs: validate-inputs
